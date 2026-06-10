@@ -49,9 +49,6 @@ struct PopoverView: View {
                         else { try? SMAppService.mainApp.unregister() }
                     }
                 Spacer()
-                Button("换人") { switchIdentity() }
-                    .font(.caption)
-                    .help("清除身份并重启,重新选择我是谁")
                 Button("退出") { NSApp.terminate(nil) }.font(.caption)
             }
         }
@@ -99,16 +96,6 @@ struct PopoverView: View {
             }
         }
         .padding(.vertical, 1)
-    }
-
-    /// 选错名字的逃生口:清身份 → 拉起新实例 → 退出当前实例(裸跑开发模式下 open 不生效,只退出)
-    private func switchIdentity() {
-        Identity.reset()
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "sleep 0.4; open \"\(Bundle.main.bundlePath)\""]
-        try? p.run()
-        NSApp.terminate(nil)
     }
 
     private func submit(_ p: Person) {

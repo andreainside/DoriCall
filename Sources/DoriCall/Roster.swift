@@ -30,8 +30,6 @@ enum Identity {
         return Roster.person(id: id)
     }
     static func save(_ id: String) { UserDefaults.standard.set(id, forKey: key) }
-    /// 清除已保存的身份(「换人」用):下次启动重新弹选择界面
-    static func reset() { UserDefaults.standard.removeObject(forKey: key) }
 }
 
 /// 全局开关(勿扰)
