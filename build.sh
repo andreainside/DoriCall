@@ -3,13 +3,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "▸ swift build -c release"
-swift build -c release
+echo "▸ swift build -c release (universal: arm64 + x86_64)"
+# 通用二进制:团队里有 Intel Mac 也能跑;带 --arch 时产物在 .build/apple/ 下,路径用 --show-bin-path 拿
+swift build -c release --arch arm64 --arch x86_64
+BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/DoriCall"
 
 APP="build/DoriCall.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/DoriCall "$APP/Contents/MacOS/DoriCall"
+cp "$BIN" "$APP/Contents/MacOS/DoriCall"
 cp Info.plist "$APP/Contents/Info.plist"
 cp Assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp Assets/menubar.png "$APP/Contents/Resources/menubar.png"
