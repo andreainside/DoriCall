@@ -35,6 +35,21 @@ struct PopoverView: View {
                 .padding(.vertical, 5)
             }
             Divider()
+            HStack(spacing: 7) {
+                Text("代表色").font(.caption).foregroundStyle(.secondary)
+                ForEach(Self.palette, id: \.self) { hex in
+                    Circle()
+                        .fill(Color(hex: hex))
+                        .frame(width: 15, height: 15)
+                        .overlay(Circle().stroke(Color.primary.opacity(currentColorHex == hex ? 0.9 : 0),
+                                                 lineWidth: 2))
+                        .onTapGesture {
+                            settings.myColorHex = hex
+                            network.setMyColor(hex)   // 新色随后续消息和探测包散播给同事
+                        }
+                }
+            }
+            Divider()
             HStack(spacing: 10) {
                 Toggle("🔕 勿扰", isOn: $settings.dnd)
                     .toggleStyle(.switch)
@@ -57,13 +72,24 @@ struct PopoverView: View {
         .onAppear { launchAtLogin = (SMAppService.mainApp.status == .enabled) }
     }
 
+    /// 可选的代表色(深色为主,保证卡片上白字可读)
+    private static let palette = ["E8537A", "F08C00", "E03131", "37B24D", "0CA678",
+                                  "1C7ED6", "3B5BDB", "7048E8", "495057"]
+
+    private var currentColorHex: String { settings.myColorHex ?? me.colorHex }
+
+    /// 对方自选过代表色就用对方的,否则名单默认色
+    private func displayColor(_ p: Person) -> Color {
+        network.peerColors[p.id].map { Color(hex: $0) } ?? p.color
+    }
+
     @ViewBuilder
     private func row(_ p: Person) -> some View {
         let online = network.onlineIds.contains(p.id)
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 Circle()
-                    .fill(online ? p.color : Color.gray.opacity(0.3))
+                    .fill(online ? displayColor(p) : Color.gray.opacity(0.3))
                     .frame(width: 9, height: 9)
                 Button {
                     if expandedId == p.id {

@@ -6,6 +6,12 @@ struct Person: Identifiable, Hashable {
     let colorHex: String  // 专属颜色(被叫卡片底色)
     let sound: String     // 专属来电提示音(macOS 系统音名)
     var color: Color { Color(hex: colorHex) }
+
+    /// 用对方随消息带来的自选色替换默认色(nil = 保持不变)
+    func withColor(_ hex: String?) -> Person {
+        guard let hex else { return self }
+        return Person(id: id, name: name, colorHex: hex, sound: sound)
+    }
 }
 
 enum Roster {
@@ -32,10 +38,17 @@ enum Identity {
     static func save(_ id: String) { UserDefaults.standard.set(id, forKey: key) }
 }
 
-/// 全局开关(勿扰)
+/// 全局开关(勿扰、自选代表色)
 final class AppSettings: ObservableObject {
     @Published var dnd: Bool = UserDefaults.standard.bool(forKey: "dnd") {
         didSet { UserDefaults.standard.set(dnd, forKey: "dnd") }
+    }
+    /// 自选代表色(hex,不带 #);nil = 用名单默认色
+    @Published var myColorHex: String? = UserDefaults.standard.string(forKey: "mycolor") {
+        didSet {
+            if let v = myColorHex { UserDefaults.standard.set(v, forKey: "mycolor") }
+            else { UserDefaults.standard.removeObject(forKey: "mycolor") }
+        }
     }
 }
 

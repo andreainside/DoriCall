@@ -13,6 +13,7 @@ final class PeerNetwork: ObservableObject {
 
     let me: Person
     @Published private(set) var onlineIds: Set<String> = []   // 只在主线程写(SwiftUI 在读)
+    @Published private(set) var peerColors: [String: String] = [:] // id → 对方自选色(只在主线程写)
     var onMessage: ((Msg) -> Void)?                           // 在主线程回调
 
     /// 所有网络回调和内部状态都在这条专用队列上 —— 千万别压主线程:
@@ -26,8 +27,13 @@ final class PeerNetwork: ObservableObject {
     private var sweepTimer: Timer?
     private var sweeping = false
     private var sweepRound = 0                        // 每 4 轮做一次全网段扫描,其余轮只刷新已知 IP
+    private var myColorHex: String?                   // 自选色,随 hello/回执散播(netQueue 上读写)
 
     init(me: Person) { self.me = me }
+
+    func setMyColor(_ hex: String?) {
+        netQueue.async { self.myColorHex = hex }
+    }
 
     func start() {
         netQueue.async {
@@ -69,9 +75,11 @@ final class PeerNetwork: ObservableObject {
                 if msg.from != self.me.id, case let NWEndpoint.hostPort(host, _) = conn.endpoint {
                     self.learn(id: msg.from, ip: "\(host)")
                 }
-                // 回送达回执,然后关连接(hello 探测也走这里:回执即"我在线")
+                self.learnColor(id: msg.from, hex: msg.color)
+                // 回送达回执,然后关连接(hello 探测也走这里:回执即"我在线");回执捎带自己的代表色
                 var ack = (try? JSONEncoder().encode(
-                    Msg(kind: .delivered, id: UUID().uuidString, from: self.me.id, fromName: self.me.name)
+                    Msg(kind: .delivered, id: UUID().uuidString, from: self.me.id, fromName: self.me.name,
+                        color: self.myColorHex)
                 )) ?? Data()
                 ack.append(0x0A)
                 conn.send(content: ack, completion: .contentProcessed { _ in conn.cancel() })
@@ -201,7 +209,8 @@ final class PeerNetwork: ObservableObject {
             case .ready:
                 guard let self,
                       var data = try? JSONEncoder().encode(
-                        Msg(kind: .hello, id: UUID().uuidString, from: self.me.id, fromName: self.me.name)
+                        Msg(kind: .hello, id: UUID().uuidString, from: self.me.id, fromName: self.me.name,
+                            color: self.myColorHex)
                       ) else { finish(nil); return }
                 data.append(0x0A)
                 conn.send(content: data, completion: .contentProcessed { err in
@@ -210,6 +219,7 @@ final class PeerNetwork: ObservableObject {
                         guard let ackData,
                               let ack = try? JSONDecoder().decode(Msg.self, from: ackData),
                               ack.kind == .delivered else { finish(nil); return }
+                        self.learnColor(id: ack.from, hex: ack.color)
                         finish(ack.from)
                     }
                 })
@@ -220,6 +230,14 @@ final class PeerNetwork: ObservableObject {
             }
         }
         conn.start(queue: netQueue)
+    }
+
+    /// 对方随包捎来的自选代表色;@Published 给 SwiftUI 的圆点用,主线程写
+    private func learnColor(id: String, hex: String?) {
+        guard let hex, id != me.id else { return }
+        DispatchQueue.main.async {
+            if self.peerColors[id] != hex { self.peerColors[id] = hex }
+        }
     }
 
     /// 入站连接附带的免费情报:msg.from 就住在对端 IP 上

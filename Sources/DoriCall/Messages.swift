@@ -19,4 +19,5 @@ struct Msg: Codable {
     var action: String? = nil   // kind == .response: "ok" | "wait" | "dnd"
     var replyTo: String? = nil  // kind == .response: 对应原消息 id
     var broadcast: Bool? = nil  // kind == .call 且为 📢 广播时 true
+    var color: String? = nil    // 发送者自选代表色 hex;随消息/hello/回执传播,nil = 名单默认色
 }

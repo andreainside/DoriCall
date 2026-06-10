@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateBlink()
         }
         net.onMessage = { [weak self] msg in self?.handle(msg) }
+        net.setMyColor(settings.myColorHex)
         net.start()
         setupStatusItem(me: me)
         // 仅 /Applications 里的正式安装版注册开机自启;编译产物 build/DoriCall.app 不注册,
@@ -52,8 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - 收消息
 
     private func handle(_ msg: Msg) {
-        let from = Roster.person(id: msg.from)
-            ?? Person(id: msg.from, name: msg.fromName, colorHex: "868E96", sound: "Glass")
+        let from = (Roster.person(id: msg.from)
+            ?? Person(id: msg.from, name: msg.fromName, colorHex: "868E96", sound: "Glass"))
+            .withColor(msg.color)   // 对方自选了代表色就用对方的
         switch msg.kind {
         case .call:
             let isBroadcast = msg.broadcast == true
@@ -98,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func autoReplyDND(_ msg: Msg, from: Person) {
         guard let net = network else { return }
         let resp = Msg(kind: .response, id: UUID().uuidString, from: net.me.id, fromName: net.me.name,
-                       action: "dnd", replyTo: msg.id)
+                       action: "dnd", replyTo: msg.id, color: settings.myColorHex)
         net.send(resp, toId: from.id) { _ in }
     }
 
@@ -114,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         defer { cardStore.remove(card.id) }
         guard let net = network, let from = card.from, card.needsResponse else { return }
         let resp = Msg(kind: .response, id: UUID().uuidString, from: net.me.id, fromName: net.me.name,
-                       action: action, replyTo: card.sourceMsgId)
+                       action: action, replyTo: card.sourceMsgId, color: settings.myColorHex)
         net.send(resp, toId: from.id) { _ in }
     }
 
@@ -123,7 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func send(kind: MsgKind, to p: Person, text: String?) {
         guard let net = network else { return }
         popover.performClose(nil)
-        let msg = Msg(kind: kind, id: UUID().uuidString, from: net.me.id, fromName: net.me.name, text: text)
+        let msg = Msg(kind: kind, id: UUID().uuidString, from: net.me.id, fromName: net.me.name, text: text,
+                      color: settings.myColorHex)
         net.send(msg, toId: p.id) { [weak self] ok in
             guard let self else { return }
             let title = ok ? "✓ 已送达 \(p.name)" : "✗ \(p.name) 不在线,没送到"
@@ -146,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for t in targets {
             group.enter()
             let msg = Msg(kind: .call, id: UUID().uuidString, from: net.me.id, fromName: net.me.name,
-                          broadcast: true)
+                          broadcast: true, color: settings.myColorHex)
             net.send(msg, toId: t.id) { ok in
                 if ok { delivered += 1 }
                 group.leave()
