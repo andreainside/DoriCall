@@ -6,6 +6,8 @@
     <string>zh_CN</string>
     <key>CFBundleExecutable</key>
     <string>DoriCall</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>life.dori.doricall</string>
     <key>CFBundleInfoDictionaryVersion</key>

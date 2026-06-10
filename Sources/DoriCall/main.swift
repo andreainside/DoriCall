@@ -173,7 +173,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - 有未处理的叫人时,菜单栏图标闪烁
 
+    /// 菜单栏常态图标:打包进 Resources 的 Dori 头像;裸跑(无 .app)时退回  符号
+    private static let doriMenuIcon: NSImage? = {
+        guard let path = Bundle.main.path(forResource: "menubar", ofType: "png"),
+              let img = NSImage(contentsOfFile: path) else { return nil }
+        img.size = NSSize(width: 18, height: 18)
+        img.isTemplate = false   // 保留品牌彩色
+        return img
+    }()
+
     private static func icon(alert: Bool) -> NSImage? {
+        if !alert, let dori = doriMenuIcon { return dori }
         let img = NSImage(systemSymbolName: alert ? "bell.fill" : "apple.logo",
                           accessibilityDescription: "DoriCall")
         img?.isTemplate = true
