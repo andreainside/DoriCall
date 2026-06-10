@@ -57,28 +57,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch msg.kind {
         case .call:
             let isBroadcast = msg.broadcast == true
-            cardStore.push(.init(style: .call, from: from,
-                                 title: isBroadcast ? "📢 \(from.name) 叫大家" : "\(from.name) 在叫你",
-                                 detail: nil, sourceMsgId: msg.id, broadcast: isBroadcast))
-            if settings.dnd { autoReplyDND(msg, from: from) } else { Sounds.incoming(from: from) }
+            let card = CardStore.Card(style: .call, from: from,
+                                      title: isBroadcast ? "📢 \(from.name) 叫大家" : "\(from.name) 在叫你",
+                                      detail: nil, sourceMsgId: msg.id, broadcast: isBroadcast, face: "dori-loud")
+            cardStore.push(card)
+            if settings.dnd { autoReplyDND(msg, from: from) } else {
+                Sounds.incoming(from: from)
+                scheduleAutoDismiss(card)
+            }
         case .text:
-            cardStore.push(.init(style: .text, from: from, title: "💬 \(from.name)",
-                                 detail: msg.text ?? "", sourceMsgId: msg.id, broadcast: false))
-            if settings.dnd { autoReplyDND(msg, from: from) } else { Sounds.incoming(from: from) }
+            let card = CardStore.Card(style: .text, from: from, title: "💬 \(from.name)",
+                                      detail: msg.text ?? "", sourceMsgId: msg.id, broadcast: false, face: "dori-wink")
+            cardStore.push(card)
+            if settings.dnd { autoReplyDND(msg, from: from) } else {
+                Sounds.incoming(from: from)
+                scheduleAutoDismiss(card)
+            }
         case .thumbs:
             cardStore.push(.init(style: .thumbs, from: from, title: "\(from.name) 给你点了个赞",
-                                 detail: nil, sourceMsgId: msg.id, broadcast: false), autoDismiss: 6)
+                                 detail: nil, sourceMsgId: msg.id, broadcast: false, face: "dori-thumbsup"), autoDismiss: 6)
             if !settings.dnd { Sounds.thumbs() }
         case .response:
             let label: String
+            let face: String?
             switch msg.action {
-            case "ok":   label = "👌 \(from.name):收到"
-            case "wait": label = "🫷 \(from.name):等会"
-            case "dnd":  label = "🔕 \(from.name) 勿扰中,看到会回你"
-            default:     label = "\(from.name) 已回应"
+            case "ok":   label = "👌 \(from.name):收到"; face = "dori-victory"
+            case "wait": label = "🫷 \(from.name):等会"; face = "dori-working"
+            case "dnd":  label = "🔕 \(from.name) 勿扰中,看到会回你"; face = "dori-sleep"
+            default:     label = "\(from.name) 已回应"; face = nil
             }
             cardStore.push(.init(style: .info, from: from, title: label,
-                                 detail: nil, sourceMsgId: msg.id, broadcast: false), autoDismiss: 4)
+                                 detail: nil, sourceMsgId: msg.id, broadcast: false, face: face), autoDismiss: 4)
             if !settings.dnd { Sounds.info() }
         case .delivered:
             break
@@ -91,6 +100,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let resp = Msg(kind: .response, id: UUID().uuidString, from: net.me.id, fromName: net.me.name,
                        action: "dnd", replyTo: msg.id)
         net.send(resp, toId: from.id) { _ in }
+    }
+
+    /// 10 秒没点按钮 → 静默收起卡片,不给对方发任何回执(已被点掉则什么也不发生)
+    private func scheduleAutoDismiss(_ card: CardStore.Card) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            self?.cardStore.remove(card.id)
+        }
     }
 
     /// 点了「收到 👌」/「等会 🫷」

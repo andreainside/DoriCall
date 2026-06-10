@@ -19,6 +19,7 @@ final class CardStore: ObservableObject {
         let detail: String?     // text 卡正文
         let sourceMsgId: String?
         let broadcast: Bool
+        var face: String? = nil // Resources 里的 Dori 表情图名,nil = 纯文字卡
         var needsResponse: Bool { style == .call || style == .text }
     }
 
@@ -69,10 +70,11 @@ struct CardView: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            if card.style == .call || card.style == .text {
-                AppleManView(ringing: true)
-            } else if card.style == .thumbs {
-                Text("👍").font(.system(size: 44))
+            if let face = card.face {
+                // 点赞原画是横构图(双手张开),同样的框看起来人更小,给大一号
+                DoriFaceView(face: face,
+                             size: card.style == .info ? 46 : (card.style == .thumbs ? 78 : 68),
+                             ringing: card.needsResponse)
             }
             VStack(alignment: .leading, spacing: 10) {
                 Text(card.title)
