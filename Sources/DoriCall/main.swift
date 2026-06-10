@@ -14,7 +14,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var blinkOn = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        // 测试/调试用:--dock 让应用显示在程序坞(便于自动化工具识别);正常运行只在菜单栏
+        NSApp.setActivationPolicy(CommandLine.arguments.contains("--dock") ? .regular : .accessory)
         // 测试用:--whoami <id> 跳过身份选择(不写 UserDefaults)
         if let i = CommandLine.arguments.firstIndex(of: "--whoami"), i + 1 < CommandLine.arguments.count {
             Identity.overrideId = CommandLine.arguments[i + 1]

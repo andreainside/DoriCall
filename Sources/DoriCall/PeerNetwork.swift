@@ -88,6 +88,8 @@ final class PeerNetwork: ObservableObject {
         let endpoint = NWEndpoint.service(name: toId, type: Self.serviceType, domain: "local.", interface: nil)
         let params = NWParameters.tcp
         params.includePeerToPeer = true
+        // 局域网直连,绝不走系统代理 —— 否则开着 Clash 等代理时连接会被代理吞掉
+        params.preferNoProxies = true
         let conn = NWConnection(to: endpoint, using: params)
 
         var finished = false
