@@ -12,6 +12,7 @@ struct PopoverView: View {
     @State private var expandedId: String?
     @State private var draft = ""
     @State private var launchAtLogin = false
+    @State private var showColorPicker = false
     @FocusState private var focusedId: String?
 
     var body: some View {
@@ -34,19 +35,22 @@ struct PopoverView: View {
                 }
                 .padding(.vertical, 5)
             }
-            Divider()
-            HStack(spacing: 7) {
-                Text("代表色").font(.caption).foregroundStyle(.secondary)
-                ForEach(Self.palette, id: \.self) { hex in
-                    Circle()
-                        .fill(Color(hex: hex))
-                        .frame(width: 15, height: 15)
-                        .overlay(Circle().stroke(Color.primary.opacity(currentColorHex == hex ? 0.9 : 0),
-                                                 lineWidth: 2))
-                        .onTapGesture {
-                            settings.myColorHex = hex
-                            network.setMyColor(hex)   // 新色随后续消息和探测包散播给同事
-                        }
+            if showColorPicker {
+                Divider()
+                HStack(spacing: 6) {
+                    ForEach(Self.palette, id: \.self) { hex in
+                        Circle()
+                            .fill(Color(hex: hex))
+                            .frame(width: 15, height: 15)
+                            .overlay(Circle().stroke(Color.primary.opacity(currentColorHex == hex ? 0.9 : 0),
+                                                     lineWidth: 2))
+                            .onTapGesture {
+                                settings.myColorHex = hex
+                                network.setMyColor(hex)   // 新色随后续消息和探测包散播给同事
+                            }
+                    }
+                    Spacer()
+                    Button("确认") { showColorPicker = false }.font(.caption)
                 }
             }
             Divider()
@@ -64,6 +68,12 @@ struct PopoverView: View {
                         else { try? SMAppService.mainApp.unregister() }
                     }
                 Spacer()
+                Circle()
+                    .fill(Color(hex: currentColorHex))
+                    .frame(width: 14, height: 14)
+                    .overlay(Circle().stroke(Color.primary.opacity(0.25), lineWidth: 1))
+                    .onTapGesture { showColorPicker.toggle() }
+                    .help("挑选我的代表色")
                 Button("退出") { NSApp.terminate(nil) }.font(.caption)
             }
         }
