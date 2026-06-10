@@ -6,6 +6,7 @@ enum MsgKind: String, Codable {
     case text       // 💬 短文字
     case response   // 被叫方的回应(ok / wait / dnd)
     case delivered  // 链路层送达回执
+    case hello      // 在线探测(网段轮询用),静默回执、不弹卡
 }
 
 /// 网络上传输的唯一消息结构:单行 JSON + '\n' 结尾

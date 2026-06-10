@@ -89,7 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             cardStore.push(.init(style: .info, from: from, title: label,
                                  detail: nil, sourceMsgId: msg.id, broadcast: false, face: face), autoDismiss: 4)
             if !settings.dnd { Sounds.info() }
-        case .delivered:
+        case .delivered, .hello:
             break
         }
     }
