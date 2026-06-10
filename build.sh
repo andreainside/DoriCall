@@ -21,4 +21,6 @@ cp Assets/dori-*.png "$APP/Contents/Resources/"   # 卡片上的 Dori 表情贴�
 codesign --force -s - "$APP"
 
 (cd build && rm -f DoriCall.zip && ditto -c -k --keepParent DoriCall.app DoriCall.zip)
-echo "✅ 产出: build/DoriCall.app 和 build/DoriCall.zip"
+# DMG 是对外分发首选:第三方解压工具会弄丢 zip 里的执行权限,DMG 不会
+hdiutil create -volname DoriCall -srcfolder build/DoriCall.app -ov -format UDZO -quiet build/DoriCall.dmg
+echo "✅ 产出: build/DoriCall.app、build/DoriCall.zip 和 build/DoriCall.dmg(对外发 dmg)"
