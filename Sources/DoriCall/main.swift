@@ -1,0 +1,202 @@
+import AppKit
+import SwiftUI
+import ServiceManagement
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem?
+    private let popover = NSPopover()
+    private var network: PeerNetwork?
+    private let cardStore = CardStore()
+    private let settings = AppSettings()
+    private var panel: FloatingPanel?
+    private var firstRun: FirstRunController?
+    private var blinkTimer: Timer?
+    private var blinkOn = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        // 测试用:--whoami <id> 跳过身份选择(不写 UserDefaults)
+        if let i = CommandLine.arguments.firstIndex(of: "--whoami"), i + 1 < CommandLine.arguments.count {
+            Identity.overrideId = CommandLine.arguments[i + 1]
+        }
+        if let me = Identity.current {
+            start(me: me)
+        } else {
+            let fr = FirstRunController()
+            firstRun = fr
+            fr.show { [weak self] p in self?.start(me: p) }
+        }
+    }
+
+    private func start(me: Person) {
+        let net = PeerNetwork(me: me)
+        network = net
+        panel = FloatingPanel(store: cardStore) { [weak self] card, action in
+            self?.respond(to: card, action: action)
+        }
+        cardStore.onChange = { [weak self] in
+            self?.panel?.refresh()
+            self?.updateBlink()
+        }
+        net.onMessage = { [weak self] msg in self?.handle(msg) }
+        net.start()
+        setupStatusItem(me: me)
+        // 以 .app 形态首次运行时,自动注册开机自启
+        if Bundle.main.bundlePath.hasSuffix(".app"), SMAppService.mainApp.status == .notRegistered {
+            try? SMAppService.mainApp.register()
+        }
+    }
+
+    // MARK: - 收消息
+
+    private func handle(_ msg: Msg) {
+        let from = Roster.person(id: msg.from)
+            ?? Person(id: msg.from, name: msg.fromName, colorHex: "868E96", sound: "Glass")
+        switch msg.kind {
+        case .call:
+            let isBroadcast = msg.broadcast == true
+            cardStore.push(.init(style: .call, from: from,
+                                 title: isBroadcast ? "📢 \(from.name) 叫大家" : "\(from.name) 在叫你",
+                                 detail: nil, sourceMsgId: msg.id, broadcast: isBroadcast))
+            if settings.dnd { autoReplyDND(msg, from: from) } else { Sounds.incoming(from: from) }
+        case .text:
+            cardStore.push(.init(style: .text, from: from, title: "💬 \(from.name)",
+                                 detail: msg.text ?? "", sourceMsgId: msg.id, broadcast: false))
+            if settings.dnd { autoReplyDND(msg, from: from) } else { Sounds.incoming(from: from) }
+        case .thumbs:
+            cardStore.push(.init(style: .thumbs, from: from, title: "\(from.name) 给你点了个赞",
+                                 detail: nil, sourceMsgId: msg.id, broadcast: false), autoDismiss: 6)
+            if !settings.dnd { Sounds.thumbs() }
+        case .response:
+            let label: String
+            switch msg.action {
+            case "ok":   label = "👌 \(from.name):收到"
+            case "wait": label = "🫷 \(from.name):等会"
+            case "dnd":  label = "🔕 \(from.name) 勿扰中,看到会回你"
+            default:     label = "\(from.name) 已回应"
+            }
+            cardStore.push(.init(style: .info, from: from, title: label,
+                                 detail: nil, sourceMsgId: msg.id, broadcast: false), autoDismiss: 4)
+            if !settings.dnd { Sounds.info() }
+        case .delivered:
+            break
+        }
+    }
+
+    /// 勿扰中自动回复:卡片照常静默堆在右上角,对方立刻知道你勿扰
+    private func autoReplyDND(_ msg: Msg, from: Person) {
+        guard let net = network else { return }
+        let resp = Msg(kind: .response, id: UUID().uuidString, from: net.me.id, fromName: net.me.name,
+                       action: "dnd", replyTo: msg.id)
+        net.send(resp, toId: from.id) { _ in }
+    }
+
+    /// 点了「收到 👌」/「等会 🫷」
+    private func respond(to card: CardStore.Card, action: String) {
+        defer { cardStore.remove(card.id) }
+        guard let net = network, let from = card.from, card.needsResponse else { return }
+        let resp = Msg(kind: .response, id: UUID().uuidString, from: net.me.id, fromName: net.me.name,
+                       action: action, replyTo: card.sourceMsgId)
+        net.send(resp, toId: from.id) { _ in }
+    }
+
+    // MARK: - 发消息
+
+    private func send(kind: MsgKind, to p: Person, text: String?) {
+        guard let net = network else { return }
+        popover.performClose(nil)
+        let msg = Msg(kind: kind, id: UUID().uuidString, from: net.me.id, fromName: net.me.name, text: text)
+        net.send(msg, toId: p.id) { [weak self] ok in
+            guard let self else { return }
+            let title = ok ? "✓ 已送达 \(p.name)" : "✗ \(p.name) 不在线,没送到"
+            self.cardStore.push(.init(style: .info, from: nil, title: title, detail: nil,
+                                      sourceMsgId: nil, broadcast: false), autoDismiss: 3)
+        }
+    }
+
+    private func broadcast() {
+        guard let net = network else { return }
+        popover.performClose(nil)
+        let targets = Roster.people.filter { $0.id != net.me.id && net.onlineIds.contains($0.id) }
+        guard !targets.isEmpty else {
+            cardStore.push(.init(style: .info, from: nil, title: "✗ 没有在线的同事", detail: nil,
+                                 sourceMsgId: nil, broadcast: false), autoDismiss: 3)
+            return
+        }
+        var delivered = 0
+        let group = DispatchGroup()
+        for t in targets {
+            group.enter()
+            let msg = Msg(kind: .call, id: UUID().uuidString, from: net.me.id, fromName: net.me.name,
+                          broadcast: true)
+            net.send(msg, toId: t.id) { ok in
+                if ok { delivered += 1 }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { [weak self] in
+            self?.cardStore.push(.init(style: .info, from: nil,
+                                       title: "📢 已叫到 \(delivered)/\(targets.count) 人",
+                                       detail: nil, sourceMsgId: nil, broadcast: false), autoDismiss: 4)
+        }
+    }
+
+    // MARK: - 菜单栏
+
+    private func setupStatusItem(me: Person) {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = Self.icon(alert: false)
+        item.button?.action = #selector(togglePopover(_:))
+        item.button?.target = self
+        statusItem = item
+
+        popover.behavior = .transient
+        popover.animates = false
+        popover.contentViewController = NSHostingController(rootView: PopoverView(
+            network: network!, settings: settings, me: me,
+            sendAction: { [weak self] p, kind, text in self?.send(kind: kind, to: p, text: text) },
+            broadcastAction: { [weak self] in self?.broadcast() }
+        ))
+    }
+
+    @objc private func togglePopover(_ sender: Any?) {
+        guard let button = statusItem?.button else { return }
+        if popover.isShown {
+            popover.performClose(sender)
+        } else {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            NSApp.activate(ignoringOtherApps: true)
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
+    // MARK: - 有未处理的叫人时,菜单栏图标闪烁
+
+    private static func icon(alert: Bool) -> NSImage? {
+        let img = NSImage(systemSymbolName: alert ? "bell.fill" : "apple.logo",
+                          accessibilityDescription: "DoriCall")
+        img?.isTemplate = true
+        return img
+    }
+
+    private func updateBlink() {
+        let shouldBlink = cardStore.hasUrgent && !settings.dnd
+        if shouldBlink, blinkTimer == nil {
+            blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                self.blinkOn.toggle()
+                self.statusItem?.button?.image = Self.icon(alert: self.blinkOn)
+            }
+        } else if !shouldBlink, let t = blinkTimer {
+            t.invalidate()
+            blinkTimer = nil
+            blinkOn = false
+            statusItem?.button?.image = Self.icon(alert: false)
+        }
+    }
+}
+
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.run()
