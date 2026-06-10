@@ -12,22 +12,33 @@ final class PeerNetwork: ObservableObject {
     static let fixedPort: NWEndpoint.Port = 53535
 
     let me: Person
-    @Published private(set) var onlineIds: Set<String> = []
-    var onMessage: ((Msg) -> Void)?
+    @Published private(set) var onlineIds: Set<String> = []   // 只在主线程写(SwiftUI 在读)
+    var onMessage: ((Msg) -> Void)?                           // 在主线程回调
 
+    /// 所有网络回调和内部状态都在这条专用队列上 —— 千万别压主线程:
+    /// 一轮网段扫描有两百多个连接回调,压主线程会把自己的收消息/回执噎到超时
+    private let netQueue = DispatchQueue(label: "life.dori.doricall.net")
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var bonjourIds: Set<String> = []
     private var directPeers: [String: String] = [:]   // id → 直连 IP(固定端口探测可达)
+    private var missCount: [String: Int] = [:]        // 探测丢包容忍:连续 2 轮扫不到才判离线
     private var sweepTimer: Timer?
     private var sweeping = false
+    private var sweepRound = 0                        // 每 4 轮做一次全网段扫描,其余轮只刷新已知 IP
 
     init(me: Person) { self.me = me }
 
     func start() {
-        startListener()
-        startBrowser()
-        startSweep()
+        netQueue.async {
+            self.startListener()
+            self.startBrowser()
+            self.sweepOnce()
+        }
+        sweepTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.netQueue.async { self.sweepOnce() }
+        }
     }
 
     // MARK: - 广播自己 & 接收消息
@@ -45,12 +56,18 @@ final class PeerNetwork: ObservableObject {
         }
         l.service = NWListener.Service(name: me.id, type: Self.serviceType)
         l.newConnectionHandler = { [weak self] conn in
-            conn.start(queue: .main)
-            self?.receiveLine(on: conn) { data in
+            guard let self else { conn.cancel(); return }
+            conn.start(queue: self.netQueue)
+            self.receiveLine(on: conn) { [weak self] data in
                 guard let self, let data,
                       let msg = try? JSONDecoder().decode(Msg.self, from: data) else {
                     conn.cancel()
                     return
+                }
+                // 来包学地址:对方既然连得进来,它的来源 IP 就是可直连地址(网段扫描的免费补充,
+                // 两边互扫时谁先扫到等于双方都通)
+                if msg.from != self.me.id, case let NWEndpoint.hostPort(host, _) = conn.endpoint {
+                    self.learn(id: msg.from, ip: "\(host)")
                 }
                 // 回送达回执,然后关连接(hello 探测也走这里:回执即"我在线")
                 var ack = (try? JSONEncoder().encode(
@@ -58,16 +75,16 @@ final class PeerNetwork: ObservableObject {
                 )) ?? Data()
                 ack.append(0x0A)
                 conn.send(content: ack, completion: .contentProcessed { _ in conn.cancel() })
-                self.onMessage?(msg)
+                DispatchQueue.main.async { self.onMessage?(msg) }
             }
         }
         l.stateUpdateHandler = { [weak self] state in
             if case .failed = state {
                 l.cancel()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.startListener() }
+                self?.netQueue.asyncAfter(deadline: .now() + 2) { self?.startListener() }
             }
         }
-        l.start(queue: .main)
+        l.start(queue: netQueue)
         listener = l
     }
 
@@ -89,44 +106,63 @@ final class PeerNetwork: ObservableObject {
         b.stateUpdateHandler = { [weak self] state in
             if case .failed = state {
                 b.cancel()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.startBrowser() }
+                self?.netQueue.asyncAfter(deadline: .now() + 2) { self?.startBrowser() }
             }
         }
-        b.start(queue: .main)
+        b.start(queue: netQueue)
         browser = b
     }
 
     // MARK: - 发现同事(腿二:固定端口网段轮询)
 
-    private func startSweep() {
-        sweepOnce()
-        sweepTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            self?.sweepOnce()
-        }
-    }
-
-    /// 扫一圈本机所在 /24:对每个 IP 的固定端口发 hello,收到回执就记下「这个人在这个 IP」
+    /// 轮询发现(netQueue 上执行)。每 4 轮做一次全 /24 扫描,其余轮只刷新已知 IP ——
+    /// 全量扫描很吵(两百多个连接),降频后不挤占收消息的处理能力
     private func sweepOnce() {
         guard !sweeping, let (ip, mask) = Self.localIPv4() else { return }
         sweeping = true
-        var network = ip & mask
-        var count = ~mask &+ 1
-        if count == 0 || count > 256 {   // 大网段只扫自己所在的 /24,不当扫描器
-            network = ip & 0xFFFF_FF00
-            count = 256
-        }
+        let fullScan = sweepRound % 4 == 0
+        sweepRound += 1
         var targets: [String] = []
-        if count > 2 {
-            for off in 1...(count - 2) {
-                let host = network &+ off
-                if host != ip { targets.append(Self.ipString(host)) }
+        if fullScan {
+            var network = ip & mask
+            var count = ~mask &+ 1
+            if count == 0 || count > 256 {   // 大网段只扫自己所在的 /24,不当扫描器
+                network = ip & 0xFFFF_FF00
+                count = 256
+            }
+            if count > 2 {
+                for off in 1...(count - 2) {
+                    let host = network &+ off
+                    if host != ip { targets.append(Self.ipString(host)) }
+                }
+            }
+            // 已知在线的 IP 排最前,第一批就刷新它们的状态
+            let known = Set(directPeers.values)
+            targets.sort { known.contains($0) && !known.contains($1) }
+        } else {
+            targets = Array(Set(directPeers.values))
+            if targets.isEmpty {
+                sweeping = false
+                return
             }
         }
         var found: [String: String] = [:]
-        let batch = 64
+        let batch = 32
         func runBatch(_ start: Int) {
             if start >= targets.count {
-                self.directPeers = found
+                // 这轮没扫到的已知同伴先记一次失误,连续 2 轮失误才判离线(网烂丢包很常见)
+                var merged = found
+                for (id, ip) in self.directPeers where merged[id] == nil {
+                    let misses = (self.missCount[id] ?? 0) + 1
+                    if misses < 2 {
+                        merged[id] = ip
+                        self.missCount[id] = misses
+                    } else {
+                        self.missCount[id] = nil
+                    }
+                }
+                for id in found.keys { self.missCount[id] = nil }
+                self.directPeers = merged
                 self.refreshOnline()
                 self.sweeping = false
                 return
@@ -139,15 +175,16 @@ final class PeerNetwork: ObservableObject {
                     group.leave()
                 }
             }
-            group.notify(queue: .main) { runBatch(start + batch) }
+            group.notify(queue: self.netQueue) { runBatch(start + batch) }
         }
         runBatch(0)
     }
 
-    /// 对单个 IP 的固定端口发 hello,2.5 秒内拿到 delivered 回执则返回对方 id
+    /// 对单个 IP 的固定端口发 hello,3.5 秒内拿到 delivered 回执则返回对方 id。
+    /// 超时别设太狠:办公网实测 RTT 300~400ms 且首包常丢,1 秒会把活人误判成空地
     private func probe(_ ip: String, completion: @escaping (String?) -> Void) {
         let tcp = NWProtocolTCP.Options()
-        tcp.connectionTimeout = 1
+        tcp.connectionTimeout = 2
         let params = NWParameters(tls: nil, tcp: tcp)
         params.preferNoProxies = true
         let conn = NWConnection(host: NWEndpoint.Host(ip), port: Self.fixedPort, using: params)
@@ -158,7 +195,7 @@ final class PeerNetwork: ObservableObject {
             conn.cancel()
             completion(id)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { finish(nil) }
+        netQueue.asyncAfter(deadline: .now() + 3.5) { finish(nil) }
         conn.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready:
@@ -182,42 +219,57 @@ final class PeerNetwork: ObservableObject {
                 break
             }
         }
-        conn.start(queue: .main)
+        conn.start(queue: netQueue)
+    }
+
+    /// 入站连接附带的免费情报:msg.from 就住在对端 IP 上
+    private func learn(id: String, ip: String) {
+        missCount[id] = nil
+        guard directPeers[id] != ip else { return }
+        directPeers[id] = ip
+        refreshOnline()
     }
 
     private func refreshOnline() {
         var ids = bonjourIds.union(directPeers.keys)
         ids.remove(me.id)
-        if ids != onlineIds { onlineIds = ids }
+        // @Published 给 SwiftUI 用,必须在主线程赋值
+        DispatchQueue.main.async {
+            if ids != self.onlineIds { self.onlineIds = ids }
+        }
     }
 
     // MARK: - 发送(优先直连 IP,失败退回 Bonjour 服务名)
 
-    func send(_ msg: Msg, toId: String, completion: @escaping (Bool) -> Void) {
-        var endpoints: [NWEndpoint] = []
-        if let ip = directPeers[toId] {
-            endpoints.append(.hostPort(host: NWEndpoint.Host(ip), port: Self.fixedPort))
+    func send(_ msg: Msg, toId: String, completion userCompletion: @escaping (Bool) -> Void) {
+        let completion: (Bool) -> Void = { ok in DispatchQueue.main.async { userCompletion(ok) } }
+        netQueue.async {
+            var endpoints: [NWEndpoint] = []
+            if let ip = self.directPeers[toId] {
+                endpoints.append(.hostPort(host: NWEndpoint.Host(ip), port: Self.fixedPort))
+            }
+            endpoints.append(.service(name: toId, type: Self.serviceType, domain: "local.", interface: nil))
+            self.trySend(msg, endpoints: endpoints, completion: completion)
         }
-        endpoints.append(.service(name: toId, type: Self.serviceType, domain: "local.", interface: nil))
-        trySend(msg, endpoints: endpoints, completion: completion)
     }
 
     private func trySend(_ msg: Msg, endpoints: [NWEndpoint], completion: @escaping (Bool) -> Void) {
         guard let ep = endpoints.first else {
-            DispatchQueue.main.async { completion(false) }
+            completion(false)
             return
         }
-        sendOnce(msg, to: ep, timeout: 4) { [weak self] ok in
+        sendOnce(msg, to: ep, timeout: 5) { [weak self] ok in
             if ok { completion(true) }
             else { self?.trySend(msg, endpoints: Array(endpoints.dropFirst()), completion: completion) }
         }
     }
 
-    /// 短连接:连上 → 发一行 JSON → 等送达回执 → 关闭
+    /// 短连接:连上 → 发一行 JSON → 等送达回执 → 关闭(netQueue 上执行)
     private func sendOnce(_ msg: Msg, to endpoint: NWEndpoint, timeout: TimeInterval,
                           completion: @escaping (Bool) -> Void) {
         let params = NWParameters.tcp
-        params.includePeerToPeer = true
+        // AWDL(点对点 Wi-Fi)只对 Bonjour 服务名端点有意义;对具体 IP 开它反而可能挑错网卡
+        if case .service = endpoint { params.includePeerToPeer = true }
         // 局域网直连,绝不走系统代理 —— 否则开着 Clash 等代理时连接会被代理吞掉
         params.preferNoProxies = true
         let conn = NWConnection(to: endpoint, using: params)
@@ -227,10 +279,10 @@ final class PeerNetwork: ObservableObject {
             guard !finished else { return }
             finished = true
             conn.cancel()
-            DispatchQueue.main.async { completion(ok) }
+            completion(ok)
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { finish(false) }
+        netQueue.asyncAfter(deadline: .now() + timeout) { finish(false) }
 
         conn.stateUpdateHandler = { [weak self] state in
             switch state {
@@ -255,7 +307,7 @@ final class PeerNetwork: ObservableObject {
                 break
             }
         }
-        conn.start(queue: .main)
+        conn.start(queue: netQueue)
     }
 
     // MARK: - 按行读取
