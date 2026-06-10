@@ -42,8 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         net.onMessage = { [weak self] msg in self?.handle(msg) }
         net.start()
         setupStatusItem(me: me)
-        // 以 .app 形态首次运行时,自动注册开机自启
-        if Bundle.main.bundlePath.hasSuffix(".app"), SMAppService.mainApp.status == .notRegistered {
+        // 仅 /Applications 里的正式安装版注册开机自启;编译产物 build/DoriCall.app 不注册,
+        // 否则登录项会指向随时被删的编译目录。重复 register 无害,顺带把旧注册纠正过来。
+        if Bundle.main.bundlePath.hasPrefix("/Applications/") {
             try? SMAppService.mainApp.register()
         }
     }
